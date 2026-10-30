@@ -5,7 +5,11 @@ const pool = require('./db');
 const { sign, required, adminOnly } = require('./auth');
 
 const app = express();
-app.use(cors({ origin: (process.env.CORS_ORIGIN || 'http://localhost:5173').split(',') }));
+const allowedOrigins = new Set(
+  (process.env.CORS_ORIGIN || 'http://localhost:5173').split(',').map(origin => origin.trim()).filter(Boolean)
+);
+allowedOrigins.add('https://52-dental-clinic.pages.dev');
+app.use(cors({ origin: [...allowedOrigins] }));
 app.use(express.json());
 
 const wrap = fn => (req, res, next) => fn(req, res, next).catch(next);
