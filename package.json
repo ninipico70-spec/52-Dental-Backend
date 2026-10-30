@@ -1,0 +1,20 @@
+{
+  "name": "52-dental-clinic",
+  "version": "1.0.0",
+  "description": "52-Dental Clinic – dental management system (Express + PostgreSQL)",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "db:init": "node scripts/init-db.js",
+    "seed": "node scripts/seed.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.12.0"
+  }
+}
