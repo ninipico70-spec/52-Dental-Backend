@@ -1,4 +1,6 @@
 require('dotenv').config();
+const fs = require('fs');
+const path = require('path');
 const express = require('express'), cors = require('cors');
 const bcrypt = require('bcryptjs');
 const pool = require('./db');
@@ -14,6 +16,27 @@ app.use(express.json());
 
 const wrap = fn => (req, res, next) => fn(req, res, next).catch(next);
 const q = (text, p) => pool.query(text, p).then(r => r.rows);
+
+async function start() {
+  const schema = fs.readFileSync(path.join(__dirname, '../db/schema.sql'), 'utf8');
+  await pool.query(schema);
+  console.log('Database schema ready.');
+
+  const { ADMIN_NAME, ADMIN_EMAIL, ADMIN_PASSWORD } = process.env;
+  if (ADMIN_EMAIL && ADMIN_PASSWORD) {
+    const inserted = await q(
+      `INSERT INTO users (name,email,password_hash,role)
+       VALUES ($1,$2,$3,'admin') ON CONFLICT (email) DO NOTHING RETURNING id`,
+      [ADMIN_NAME || 'Clinic Admin', ADMIN_EMAIL.trim().toLowerCase(), await bcrypt.hash(ADMIN_PASSWORD, 10)]
+    );
+    if (inserted.length) console.log('Initial admin account created.');
+  } else if (ADMIN_EMAIL || ADMIN_PASSWORD) {
+    console.warn('Set both ADMIN_EMAIL and ADMIN_PASSWORD to provision the initial admin account.');
+  }
+
+  const port = process.env.PORT || 3000;
+  app.listen(port, () => console.log(`52-Dental Clinic API running at http://localhost:${port}/api`));
+}
 
 // ---------- Auth ----------
 app.post('/api/auth/login', wrap(async (req, res) => {
@@ -205,5 +228,7 @@ app.use((err, req, res, next) => {
   res.status(err.code === '23505' ? 409 : 500).json({ error: err.code === '23505' ? 'That value already exists.' : 'Something went wrong on the server.' });
 });
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`52-Dental Clinic API running at http://localhost:${port}/api`));
+start().catch(error => {
+  console.error('Failed to initialize the database:', error);
+  process.exit(1);
+});
