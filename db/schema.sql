@@ -6,9 +6,11 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'doctor' CHECK (role IN ('admin','doctor','assistant')),
   phone TEXT,
+  photo TEXT,
   active BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
+ALTER TABLE users ADD COLUMN IF NOT EXISTS photo TEXT;
 
 CREATE TABLE IF NOT EXISTS patients (
   id SERIAL PRIMARY KEY,

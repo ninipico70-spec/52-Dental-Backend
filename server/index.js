@@ -12,7 +12,7 @@ const allowedOrigins = new Set(
 );
 allowedOrigins.add('https://52-dental-clinic.pages.dev');
 app.use(cors({ origin: [...allowedOrigins] }));
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 
 const wrap = fn => (req, res, next) => fn(req, res, next).catch(next);
 const q = (text, p) => pool.query(text, p).then(r => r.rows);
@@ -44,7 +44,7 @@ app.post('/api/auth/login', wrap(async (req, res) => {
   const [u] = await q('SELECT * FROM users WHERE email=$1 AND active', [email.trim().toLowerCase()]);
   if (!u || !(await bcrypt.compare(password, u.password_hash)))
     return res.status(401).json({ error: 'Wrong email or password. Check both and try again.' });
-  res.json({ token: sign(u), user: { id: u.id, name: u.name, role: u.role, email: u.email } });
+  res.json({ token: sign(u), user: { id: u.id, name: u.name, role: u.role, email: u.email, photo: u.photo } });
 }));
 
 app.use('/api', required);
@@ -214,6 +214,26 @@ app.patch('/api/users/:id', adminOnly, wrap(async (req, res) => {
 }));
 
 // Own password change
+app.get('/api/me', wrap(async (req, res) => {
+  const [user] = await q('SELECT id,name,email,role,phone,photo FROM users WHERE id=$1 AND active', [req.user.id]);
+  if (!user) return res.status(404).json({ error: 'User profile not found.' });
+  res.json(user);
+}));
+
+app.patch('/api/me/profile', wrap(async (req, res) => {
+  const { photo } = req.body;
+  if (photo !== null && (typeof photo !== 'string' || photo.length > 900000 ||
+      !/^data:image\/jpeg;base64,[A-Za-z0-9+/]+={0,2}$/.test(photo))) {
+    return res.status(400).json({ error: 'Choose a valid photo and try again.' });
+  }
+  const [user] = await q(
+    'UPDATE users SET photo=$1 WHERE id=$2 AND active RETURNING id,name,email,role,phone,photo',
+    [photo, req.user.id]
+  );
+  if (!user) return res.status(404).json({ error: 'User profile not found.' });
+  res.json(user);
+}));
+
 app.post('/api/me/password', wrap(async (req, res) => {
   const { current, next } = req.body;
   const [u] = await q('SELECT * FROM users WHERE id=$1', [req.user.id]);
