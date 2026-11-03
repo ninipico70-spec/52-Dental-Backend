@@ -4,13 +4,23 @@ CREATE TABLE IF NOT EXISTS users (
   name TEXT NOT NULL,
   email TEXT UNIQUE NOT NULL,
   password_hash TEXT NOT NULL,
-  role TEXT NOT NULL DEFAULT 'doctor' CHECK (role IN ('admin','doctor','assistant')),
+  role TEXT NOT NULL DEFAULT 'doctor' CHECK (role IN ('admin','doctor','assistant','receptionist')),
   phone TEXT,
   photo TEXT,
   active BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 ALTER TABLE users ADD COLUMN IF NOT EXISTS photo TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS permission_overrides JSONB NOT NULL DEFAULT '{}'::jsonb;
+
+CREATE TABLE IF NOT EXISTS role_permissions (
+  role TEXT PRIMARY KEY CHECK (role IN ('doctor','assistant','receptionist')),
+  permissions JSONB NOT NULL
+);
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
+ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','doctor','assistant','receptionist'));
+ALTER TABLE role_permissions DROP CONSTRAINT IF EXISTS role_permissions_role_check;
+ALTER TABLE role_permissions ADD CONSTRAINT role_permissions_role_check CHECK (role IN ('doctor','assistant','receptionist'));
 
 CREATE TABLE IF NOT EXISTS patients (
   id SERIAL PRIMARY KEY,

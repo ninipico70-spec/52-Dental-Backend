@@ -21,6 +21,14 @@ The schema seeds the initial dental services if they are missing. Admins can
 edit the service catalog from the Services page; treatment selections and
 price snapshots are saved with each patient session.
 
+Admins can configure Doctor, Assistant, and Receptionist role defaults and per-user permission
+overrides in User Management. Permissions cover supported view, create, edit, and delete
+actions for each feature and are checked by the API on every request. Admin
+accounts always retain full access. Some workflows require related grants (for
+example, creating an appointment requires patient view, and creating a session
+requires session edit to complete the record). The database preserves
+configured role defaults when the service restarts.
+
 The Billing & Invoices page creates invoices manually or from a saved session.
 Invoice records include itemized totals, discounts, due dates, partial payments,
 refunds, and void history. Saving a session does not record a payment; record
