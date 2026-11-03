@@ -27,8 +27,44 @@ CREATE TABLE IF NOT EXISTS sessions (
   patient_id INT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
   session_date DATE NOT NULL DEFAULT CURRENT_DATE,
   cost NUMERIC(12,2) NOT NULL DEFAULT 0,
+  other_cost NUMERIC(12,2),
   notes TEXT,
   created_by INT REFERENCES users(id) ON DELETE SET NULL
+);
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS other_cost NUMERIC(12,2);
+
+CREATE TABLE IF NOT EXISTS services (
+  id SERIAL PRIMARY KEY,
+  service_key TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  icon TEXT NOT NULL DEFAULT '🦷',
+  duration_minutes INT NOT NULL CHECK (duration_minutes > 0),
+  price NUMERIC(12,2) NOT NULL DEFAULT 0 CHECK (price >= 0),
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  sort_order INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO services (service_key,name,icon,duration_minutes,price,sort_order) VALUES
+  ('checkup','Checkup','🩺',30,0,1),
+  ('cleaning','Cleaning','✨',45,0,2),
+  ('filling','Filling','✚',60,0,3),
+  ('root-canal','Root Canal','〽️',90,0,4),
+  ('extraction','Extraction','✂️',45,0,5),
+  ('whitening','Whitening','☀️',60,0,6),
+  ('consultation','Consultation','🗨️',30,0,7),
+  ('orthodontics','Orthodontics','🦷',60,0,8)
+ON CONFLICT (service_key) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS session_services (
+  id SERIAL PRIMARY KEY,
+  session_id INT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  service_id INT REFERENCES services(id) ON DELETE SET NULL,
+  service_name TEXT NOT NULL,
+  icon TEXT NOT NULL DEFAULT '🦷',
+  duration_minutes INT NOT NULL CHECK (duration_minutes > 0),
+  unit_price NUMERIC(12,2) NOT NULL CHECK (unit_price >= 0),
+  UNIQUE (session_id, service_id)
 );
 
 CREATE TABLE IF NOT EXISTS session_teeth (
@@ -42,15 +78,77 @@ CREATE TABLE IF NOT EXISTS session_teeth (
   UNIQUE (session_id, tooth)
 );
 
+CREATE SEQUENCE IF NOT EXISTS invoice_number_seq;
+CREATE TABLE IF NOT EXISTS invoices (
+  id SERIAL PRIMARY KEY,
+  invoice_number TEXT NOT NULL UNIQUE,
+  patient_id INT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+  session_id INT REFERENCES sessions(id) ON DELETE SET NULL,
+  issue_date DATE NOT NULL DEFAULT CURRENT_DATE,
+  due_date DATE,
+  subtotal NUMERIC(12,2) NOT NULL CHECK (subtotal >= 0),
+  discount NUMERIC(12,2) NOT NULL DEFAULT 0 CHECK (discount >= 0),
+  total NUMERIC(12,2) NOT NULL CHECK (total > 0),
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','void')),
+  voided_at TIMESTAMP,
+  void_reason TEXT,
+  created_by INT REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  CHECK (discount <= subtotal),
+  CHECK (total = subtotal - discount)
+);
+ALTER TABLE invoices DROP CONSTRAINT IF EXISTS invoices_session_id_key;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_open_session
+  ON invoices (session_id) WHERE session_id IS NOT NULL AND status='open';
+CREATE INDEX IF NOT EXISTS idx_invoices_patient_date ON invoices (patient_id, issue_date DESC);
+
+CREATE TABLE IF NOT EXISTS invoice_items (
+  id SERIAL PRIMARY KEY,
+  invoice_id INT NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+  description TEXT NOT NULL,
+  quantity NUMERIC(10,2) NOT NULL CHECK (quantity > 0),
+  unit_price NUMERIC(12,2) NOT NULL CHECK (unit_price >= 0),
+  line_total NUMERIC(12,2) NOT NULL CHECK (line_total >= 0)
+);
+
 CREATE TABLE IF NOT EXISTS payments (
   id SERIAL PRIMARY KEY,
   patient_id INT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
   session_id INT REFERENCES sessions(id) ON DELETE SET NULL,
+  invoice_id INT REFERENCES invoices(id) ON DELETE SET NULL,
+  auto_session_payment BOOLEAN NOT NULL DEFAULT FALSE,
   amount NUMERIC(12,2) NOT NULL CHECK (amount > 0),
   type TEXT NOT NULL DEFAULT 'Cash',
   batch_number TEXT,
   paid_at DATE NOT NULL DEFAULT CURRENT_DATE
 );
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS auto_session_payment BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS invoice_id INT REFERENCES invoices(id) ON DELETE SET NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_auto_session
+  ON payments (session_id) WHERE auto_session_payment AND session_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS invoice_refunds (
+  id SERIAL PRIMARY KEY,
+  invoice_id INT NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+  amount NUMERIC(12,2) NOT NULL CHECK (amount > 0),
+  type TEXT NOT NULL DEFAULT 'Cash',
+  reason TEXT NOT NULL,
+  refunded_at DATE NOT NULL DEFAULT CURRENT_DATE,
+  created_by INT REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS clinic_print_template (
+  id INT PRIMARY KEY CHECK (id = 1),
+  header_mode TEXT NOT NULL DEFAULT 'none' CHECK (header_mode IN ('none','text','image','both')),
+  header_text TEXT NOT NULL DEFAULT '',
+  header_image TEXT,
+  footer_mode TEXT NOT NULL DEFAULT 'none' CHECK (footer_mode IN ('none','text','image','both')),
+  footer_text TEXT NOT NULL DEFAULT '',
+  footer_image TEXT,
+  updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+INSERT INTO clinic_print_template (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS expenses (
   id SERIAL PRIMARY KEY,

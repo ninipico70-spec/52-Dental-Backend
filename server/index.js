@@ -1,6 +1,7 @@
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
+const { randomUUID } = require('crypto');
 const express = require('express'), cors = require('cors');
 const bcrypt = require('bcryptjs');
 const pool = require('./db');
@@ -10,9 +11,10 @@ const app = express();
 const allowedOrigins = new Set(
   (process.env.CORS_ORIGIN || 'http://localhost:5173').split(',').map(origin => origin.trim()).filter(Boolean)
 );
+allowedOrigins.add('http://localhost:5173');
 allowedOrigins.add('https://52-dental-clinic.pages.dev');
 app.use(cors({ origin: [...allowedOrigins] }));
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '2mb' }));
 
 const wrap = fn => (req, res, next) => fn(req, res, next).catch(next);
 const q = (text, p) => pool.query(text, p).then(r => r.rows);
@@ -49,11 +51,102 @@ app.post('/api/auth/login', wrap(async (req, res) => {
 
 app.use('/api', required);
 
+// ---------- Clinic print template ----------
+app.get('/api/print-template', wrap(async (req, res) => {
+  const [template] = await q(
+    `SELECT header_mode,header_text,header_image,footer_mode,footer_text,footer_image,updated_at
+     FROM clinic_print_template WHERE id=1`
+  );
+  res.json(template);
+}));
+app.patch('/api/print-template', adminOnly, wrap(async (req, res) => {
+  const { header_mode, header_text = '', header_image = null, footer_mode, footer_text = '', footer_image = null } = req.body || {};
+  const validModes = new Set(['none', 'text', 'image', 'both']);
+  const validImage = image => {
+    if (image === null) return true;
+    if (typeof image !== 'string' || image.length > 600000) return false;
+    const match = image.match(/^data:image\/jpeg;base64,([A-Za-z0-9+/]+={0,2})$/);
+    if (!match) return false;
+    const bytes = Buffer.from(match[1], 'base64');
+    return bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+  };
+  if (!validModes.has(header_mode) || !validModes.has(footer_mode) ||
+      typeof header_text !== 'string' || header_text.length > 2000 ||
+      typeof footer_text !== 'string' || footer_text.length > 2000 ||
+      !validImage(header_image) || !validImage(footer_image) ||
+      (['image', 'both'].includes(header_mode) && !header_image) ||
+      (['image', 'both'].includes(footer_mode) && !footer_image)) {
+    return res.status(400).json({ error: 'Choose a valid header and footer layout, enter text under 2000 characters, and upload valid images for image layouts.' });
+  }
+  const [template] = await q(
+    `UPDATE clinic_print_template
+     SET header_mode=$1,header_text=$2,header_image=$3,footer_mode=$4,footer_text=$5,footer_image=$6,updated_at=NOW()
+     WHERE id=1
+     RETURNING header_mode,header_text,header_image,footer_mode,footer_text,footer_image,updated_at`,
+    [header_mode, header_text.trim(), header_image, footer_mode, footer_text.trim(), footer_image]
+  );
+  res.json(template);
+}));
+
+// ---------- Services ----------
+app.get('/api/services', wrap(async (req, res) => {
+  const includeInactive = req.user.role === 'admin' && req.query.include_inactive === 'true';
+  res.json(await q(
+    `SELECT id,service_key,name,icon,duration_minutes,price,active,sort_order
+     FROM services ${includeInactive ? '' : 'WHERE active'}
+     ORDER BY sort_order,id`
+  ));
+}));
+app.post('/api/services', adminOnly, wrap(async (req, res) => {
+  const { name, icon = '🦷', duration_minutes, price = 0 } = req.body;
+  const duration = Number(duration_minutes), amount = Number(price);
+  if (typeof name !== 'string' || !name.trim() || name.trim().length > 100 ||
+      typeof icon !== 'string' || icon.length > 16 ||
+      !Number.isInteger(duration) || duration < 1 || duration > 1440 ||
+      !Number.isFinite(amount) || amount < 0) {
+    return res.status(400).json({ error: 'Enter a service name, a duration from 1 to 1440 minutes, and a valid non-negative price.' });
+  }
+  const [service] = await q(
+    `INSERT INTO services (service_key,name,icon,duration_minutes,price,sort_order)
+     VALUES ($1,$2,$3,$4,$5,COALESCE((SELECT MAX(sort_order)+1 FROM services),1))
+     RETURNING id,service_key,name,icon,duration_minutes,price,active,sort_order`,
+    [`custom-${randomUUID()}`, name.trim(), icon || '🦷', duration, amount]
+  );
+  res.status(201).json(service);
+}));
+app.patch('/api/services/:id', adminOnly, wrap(async (req, res) => {
+  if (Object.keys(req.body).length === 1 && typeof req.body.active === 'boolean') {
+    const [service] = await q(
+      'UPDATE services SET active=$1 WHERE id=$2 RETURNING id,service_key,name,icon,duration_minutes,price,active,sort_order',
+      [req.body.active, req.params.id]
+    );
+    return service ? res.json(service) : res.status(404).json({ error: 'Service not found.' });
+  }
+
+  const { name, icon, duration_minutes, price } = req.body;
+  const duration = Number(duration_minutes), amount = Number(price);
+  if (typeof name !== 'string' || !name.trim() || name.trim().length > 100 ||
+      typeof icon !== 'string' || icon.length > 16 ||
+      !Number.isInteger(duration) || duration < 1 || duration > 1440 ||
+      !Number.isFinite(amount) || amount < 0) {
+    return res.status(400).json({ error: 'Enter a service name, a duration from 1 to 1440 minutes, and a valid non-negative price.' });
+  }
+  const [service] = await q(
+    `UPDATE services SET name=$1,icon=$2,duration_minutes=$3,price=$4
+     WHERE id=$5 RETURNING id,service_key,name,icon,duration_minutes,price,active,sort_order`,
+    [name.trim(), icon || '🦷', duration, amount, req.params.id]
+  );
+  if (!service) return res.status(404).json({ error: 'Service not found.' });
+  res.json(service);
+}));
+
 // ---------- Dashboard ----------
 app.get('/api/dashboard', wrap(async (req, res) => {
   const [r] = await q(`SELECT
-    (SELECT COALESCE(SUM(amount),0) FROM payments WHERE paid_at=CURRENT_DATE) AS payments_today,
+    ((SELECT COALESCE(SUM(amount),0) FROM payments WHERE paid_at=CURRENT_DATE)
+      -(SELECT COALESCE(SUM(amount),0) FROM invoice_refunds WHERE refunded_at=CURRENT_DATE)) AS payments_today,
     (SELECT COALESCE(SUM(amount),0) FROM payments WHERE paid_at=CURRENT_DATE)
+      -(SELECT COALESCE(SUM(amount),0) FROM invoice_refunds WHERE refunded_at=CURRENT_DATE)
       - (SELECT COALESCE(SUM(amount),0) FROM expenses WHERE spent_at=CURRENT_DATE) AS box,
     (SELECT COUNT(*) FROM patients) AS patients,
     (SELECT COUNT(*) FROM appointments WHERE appt_at::date=CURRENT_DATE AND status='scheduled') AS appointments,
@@ -98,19 +191,33 @@ app.get('/api/patients/:id/statement', wrap(async (req, res) => {
   if (!p) return res.status(404).json({ error: 'Patient file not found.' });
   const [t] = await q(`SELECT
     (SELECT COUNT(*) FROM sessions WHERE patient_id=$1) AS sessions,
-    (SELECT COALESCE(SUM(cost),0) FROM sessions WHERE patient_id=$1) AS charged,
-    (SELECT COALESCE(SUM(amount),0) FROM payments WHERE patient_id=$1) AS paid`, [p.id]);
+    ((SELECT COALESCE(SUM(s.cost),0) FROM sessions s
+      WHERE s.patient_id=$1 AND NOT EXISTS (SELECT 1 FROM invoices i WHERE i.session_id=s.id AND i.status='open'))
+     +(SELECT COALESCE(SUM(total),0) FROM invoices WHERE patient_id=$1 AND status='open')) AS charged,
+    ((SELECT COALESCE(SUM(amount),0) FROM payments WHERE patient_id=$1)
+     -(SELECT COALESCE(SUM(r.amount),0) FROM invoice_refunds r JOIN invoices i ON i.id=r.invoice_id WHERE i.patient_id=$1)) AS paid`, [p.id]);
   const payments = await q('SELECT * FROM payments WHERE patient_id=$1 ORDER BY paid_at DESC, id DESC', [p.id]);
+  const invoices = await q(
+    `SELECT i.id,i.invoice_number,i.issue_date,i.due_date,i.total,i.status,
+       COALESCE(pay.paid,0) AS paid,COALESCE(ref.refunded,0) AS refunded
+     FROM invoices i
+     LEFT JOIN LATERAL (SELECT SUM(amount) AS paid FROM payments WHERE invoice_id=i.id) pay ON TRUE
+     LEFT JOIN LATERAL (SELECT SUM(amount) AS refunded FROM invoice_refunds WHERE invoice_id=i.id) ref ON TRUE
+     WHERE i.patient_id=$1 ORDER BY i.issue_date DESC,i.id DESC`, [p.id]);
+  invoices.forEach(invoice => {
+    invoice.balance = Math.max(Number(invoice.total) - Number(invoice.paid) + Number(invoice.refunded), 0);
+    invoice.payment_status = invoiceStatus(invoice);
+  });
   res.json({ patient: p, sessions: +t.sessions, charged: +t.charged, paid: +t.paid,
-             debt: Math.max(+t.charged - +t.paid, 0), payments });
+             debt: Math.max(+t.charged - +t.paid, 0), payments, invoices });
 }));
 
 // ---------- Sessions & tooth chart ----------
 app.post('/api/patients/:id/sessions', wrap(async (req, res) => {
   const { session_date, cost = 0, notes } = req.body;
   const [s] = await q(
-    `INSERT INTO sessions (patient_id,session_date,cost,notes,created_by)
-     VALUES ($1,COALESCE($2::date,CURRENT_DATE),$3,$4,$5) RETURNING *`,
+    `INSERT INTO sessions (patient_id,session_date,cost,other_cost,notes,created_by)
+     VALUES ($1,COALESCE($2::date,CURRENT_DATE),$3,$3,$4,$5) RETURNING *`,
     [req.params.id, session_date || null, cost, notes || null, req.user.id]);
   res.status(201).json(s);
 }));
@@ -118,34 +225,361 @@ app.get('/api/sessions/:id', wrap(async (req, res) => {
   const [s] = await q('SELECT s.*, p.name AS patient_name FROM sessions s JOIN patients p ON p.id=s.patient_id WHERE s.id=$1', [req.params.id]);
   if (!s) return res.status(404).json({ error: 'Session not found.' });
   s.teeth = await q('SELECT tooth,condition,details,surfaces,note FROM session_teeth WHERE session_id=$1 ORDER BY tooth', [s.id]);
+  s.services = await q(
+    'SELECT session_services.service_id AS id,service_name AS name,icon,duration_minutes,unit_price AS price FROM session_services WHERE session_id=$1 ORDER BY session_services.id',
+    [s.id]
+  );
   res.json(s);
 }));
 app.put('/api/sessions/:id', wrap(async (req, res) => {
-  const { session_date, cost = 0, notes, teeth = [] } = req.body;
+  const { session_date, cost, other_cost, service_ids, notes, teeth = [] } = req.body;
+  if (!Array.isArray(teeth))
+    return res.status(400).json({ error: 'Session teeth must be a list.' });
+
+  const usesServices = Object.prototype.hasOwnProperty.call(req.body, 'service_ids');
+  const selectedIds = service_ids === undefined ? [] : service_ids;
+  if (!Array.isArray(selectedIds) ||
+      selectedIds.some(id => !Number.isInteger(Number(id)) || Number(id) < 1) ||
+      new Set(selectedIds.map(Number)).size !== selectedIds.length)
+    return res.status(400).json({ error: 'Selected services are invalid.' });
+
+  const manualCost = Number(cost);
+  const additionalCost = Number(other_cost);
+  if ((!usesServices && (!Number.isFinite(manualCost) || manualCost < 0)) ||
+      (usesServices && (!Number.isFinite(additionalCost) || additionalCost < 0)))
+    return res.status(400).json({ error: 'Session cost must be a valid non-negative amount.' });
+
   const c = await pool.connect();
   try {
     await c.query('BEGIN');
-    await c.query('UPDATE sessions SET session_date=COALESCE($1::date,session_date),cost=$2,notes=$3 WHERE id=$4',
-      [session_date || null, cost, notes || null, req.params.id]);
+    const existing = await c.query('SELECT id,patient_id FROM sessions WHERE id=$1 FOR UPDATE', [req.params.id]);
+    if (!existing.rowCount) {
+      await c.query('ROLLBACK');
+      return res.status(404).json({ error: 'Session not found.' });
+    }
+
+    let totalCost = manualCost;
+    if (usesServices) {
+      const currentServices = await c.query(
+        'SELECT id,name,icon,duration_minutes,price,active FROM services WHERE id=ANY($1::int[]) FOR SHARE',
+        [selectedIds.map(Number)]
+      );
+      const previousServices = await c.query(
+        'SELECT service_id,service_name,icon,duration_minutes,unit_price FROM session_services WHERE session_id=$1',
+        [req.params.id]
+      );
+      const previousById = new Map(previousServices.rows.map(service => [service.service_id, service]));
+      const currentById = new Map(currentServices.rows.map(service => [service.id, service]));
+      const invalid = selectedIds.map(Number).some(id => {
+        const service = currentById.get(id);
+        return !service || (!service.active && !previousById.has(id));
+      });
+      if (invalid) {
+        await c.query('ROLLBACK');
+        return res.status(400).json({ error: 'One or more selected services are unavailable. Refresh the page and try again.' });
+      }
+
+      await c.query('DELETE FROM session_services WHERE session_id=$1', [req.params.id]);
+      let servicesTotal = 0;
+      for (const id of selectedIds.map(Number)) {
+        const service = currentById.get(id);
+        const previous = previousById.get(id);
+        const name = previous ? previous.service_name : service.name;
+        const icon = previous ? previous.icon : service.icon;
+        const duration = previous ? previous.duration_minutes : service.duration_minutes;
+        const price = previous ? previous.unit_price : service.price;
+        servicesTotal += Math.round(Number(price) * 100);
+        await c.query(
+          `INSERT INTO session_services (session_id,service_id,service_name,icon,duration_minutes,unit_price)
+           VALUES ($1,$2,$3,$4,$5,$6)`,
+          [req.params.id, id, name, icon, duration, price]
+        );
+      }
+      totalCost = (servicesTotal + Math.round(additionalCost * 100)) / 100;
+    }
+
+    await c.query(
+      `UPDATE sessions SET session_date=COALESCE($1::date,session_date),cost=$2,
+       other_cost=CASE WHEN $3 THEN $4 ELSE other_cost END,notes=$5 WHERE id=$6`,
+      [session_date || null, totalCost, usesServices, usesServices ? additionalCost : null, notes || null, req.params.id]
+    );
     await c.query('DELETE FROM session_teeth WHERE session_id=$1', [req.params.id]);
     for (const t of teeth)
       await c.query('INSERT INTO session_teeth (session_id,tooth,condition,details,surfaces,note) VALUES ($1,$2,$3,$4,$5,$6)',
         [req.params.id, t.tooth, t.condition || 'Normal', t.details || [], t.surfaces || [], t.note || null]);
-    await c.query('COMMIT'); res.json({ ok: true });
+    await c.query('COMMIT'); res.json({ ok: true, payment_recorded: false });
   } catch (e) { await c.query('ROLLBACK'); throw e; } finally { c.release(); }
 }));
 app.delete('/api/sessions/:id', wrap(async (req, res) => {
-  await q('DELETE FROM sessions WHERE id=$1', [req.params.id]); res.json({ ok: true });
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    await c.query('DELETE FROM payments WHERE session_id=$1 AND auto_session_payment AND invoice_id IS NULL', [req.params.id]);
+    await c.query('DELETE FROM sessions WHERE id=$1', [req.params.id]);
+    await c.query('COMMIT');
+    res.json({ ok: true });
+  } catch (e) { await c.query('ROLLBACK'); throw e; } finally { c.release(); }
+}));
+
+// ---------- Invoices ----------
+const invoiceSummarySql = `SELECT i.*,p.name AS patient_name,p.phone AS patient_phone,p.gender AS patient_gender,
+  COALESCE(pay.paid,0) AS paid,COALESCE(ref.refunded,0) AS refunded
+  FROM invoices i JOIN patients p ON p.id=i.patient_id
+  LEFT JOIN LATERAL (SELECT SUM(amount) AS paid FROM payments WHERE invoice_id=i.id) pay ON TRUE
+  LEFT JOIN LATERAL (SELECT SUM(amount) AS refunded FROM invoice_refunds WHERE invoice_id=i.id) ref ON TRUE`;
+function invoiceStatus(invoice) {
+  if (invoice.status === 'void') return 'void';
+  const remaining = Math.max(Number(invoice.total) - Number(invoice.paid) + Number(invoice.refunded), 0);
+  if (remaining < 0.005) return 'paid';
+  if (Number(invoice.paid) > Number(invoice.refunded)) return 'partially paid';
+  if (invoice.due_date && String(invoice.due_date).slice(0, 10) < new Date().toISOString().slice(0, 10)) return 'overdue';
+  return 'unpaid';
+}
+async function getInvoice(id) {
+  const [invoice] = await q(`${invoiceSummarySql} WHERE i.id=$1`, [id]);
+  if (!invoice) return null;
+  invoice.paid = Number(invoice.paid);
+  invoice.refunded = Number(invoice.refunded);
+  invoice.balance = Math.max(Number(invoice.total) - invoice.paid + invoice.refunded, 0);
+  invoice.payment_status = invoiceStatus(invoice);
+  invoice.items = await q('SELECT id,description,quantity,unit_price,line_total FROM invoice_items WHERE invoice_id=$1 ORDER BY id', [id]);
+  invoice.payments = await q('SELECT id,amount,type,batch_number,paid_at FROM payments WHERE invoice_id=$1 ORDER BY paid_at,id', [id]);
+  invoice.refunds = await q('SELECT id,amount,type,reason,refunded_at FROM invoice_refunds WHERE invoice_id=$1 ORDER BY refunded_at,id', [id]);
+  return invoice;
+}
+async function nextInvoiceNumber(client, issueDate) {
+  const [{ number }] = (await client.query("SELECT nextval('invoice_number_seq') AS number")).rows;
+  return `INV-${String(issueDate).slice(0, 4)}-${String(number).padStart(6, '0')}`;
+}
+function validDate(value) {
+  if (!value) return true;
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+app.get('/api/invoices', wrap(async (req, res) => {
+  const { name = '', status = '' } = req.query;
+  const invoices = await q(`${invoiceSummarySql}
+    WHERE p.name ILIKE $1 ORDER BY i.issue_date DESC,i.id DESC LIMIT 500`, [`%${name}%`]);
+  const result = invoices.map(invoice => ({ ...invoice, payment_status: invoiceStatus(invoice),
+    balance: Math.max(Number(invoice.total) - Number(invoice.paid) + Number(invoice.refunded), 0) }));
+  res.json(status ? result.filter(invoice => invoice.payment_status === status) : result);
+}));
+app.get('/api/invoices/:id', wrap(async (req, res) => {
+  const invoice = await getInvoice(req.params.id);
+  invoice ? res.json(invoice) : res.status(404).json({ error: 'Invoice not found.' });
+}));
+app.post('/api/sessions/:id/invoice', wrap(async (req, res) => {
+  const client = await pool.connect();
+  let invoiceId;
+  let created = false;
+  try {
+    await client.query('BEGIN');
+    const [session] = (await client.query(
+      `SELECT s.*,p.name AS patient_name FROM sessions s JOIN patients p ON p.id=s.patient_id
+       WHERE s.id=$1 FOR UPDATE OF s`, [req.params.id])).rows;
+    if (!session) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Session not found.' }); }
+    const [existing] = (await client.query("SELECT id FROM invoices WHERE session_id=$1 AND status='open'", [session.id])).rows;
+    if (existing) {
+      invoiceId = existing.id;
+    } else {
+      const items = (await client.query(
+        'SELECT service_name AS description,unit_price AS price FROM session_services WHERE session_id=$1 ORDER BY id',
+        [session.id])).rows.map(item => ({ description: item.description, quantity: 1, unit_price: Number(item.price) }));
+      const servicesTotal = items.reduce((sum, item) => sum + Math.round(item.unit_price * 100), 0);
+      const total = Math.round(Number(session.cost) * 100);
+      const additional = total - servicesTotal;
+      if (additional > 0) items.push({ description: items.length ? 'Additional session cost' : `Dental session #${session.id}`, quantity: 1, unit_price: additional / 100 });
+      if (!items.length && total > 0) items.push({ description: `Dental session #${session.id}`, quantity: 1, unit_price: total / 100 });
+      if (total <= 0) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'A zero-value session cannot be invoiced.' }); }
+      const [{ today }] = (await client.query('SELECT CURRENT_DATE::text AS today')).rows;
+      const issueDate = req.body?.issue_date || today;
+      const dueDate = req.body?.due_date || null;
+      if (!validDate(issueDate) || !validDate(dueDate)) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Enter valid issue and due dates.' }); }
+      const number = await nextInvoiceNumber(client, issueDate);
+      const [invoice] = (await client.query(
+        `INSERT INTO invoices (invoice_number,patient_id,session_id,issue_date,due_date,subtotal,total,created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$6,$7) RETURNING id`,
+        [number, session.patient_id, session.id, issueDate, dueDate, total / 100, req.user.id])).rows;
+      invoiceId = invoice.id;
+      for (const item of items) {
+        const lineTotal = Math.round(item.quantity * item.unit_price * 100) / 100;
+        await client.query(
+          'INSERT INTO invoice_items (invoice_id,description,quantity,unit_price,line_total) VALUES ($1,$2,$3,$4,$5)',
+          [invoiceId, item.description, item.quantity, item.unit_price, lineTotal]);
+      }
+      await client.query(
+        'UPDATE payments SET invoice_id=$1 WHERE session_id=$2 AND auto_session_payment AND invoice_id IS NULL AND amount<=$3',
+        [invoiceId, session.id, total / 100]);
+      created = true;
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
+  res.status(created ? 201 : 200).json({ id: invoiceId, created, invoice: await getInvoice(invoiceId) });
+}));
+app.post('/api/invoices', wrap(async (req, res) => {
+  const { patient_id, issue_date, due_date, discount = 0, items } = req.body || {};
+  if (!Number.isInteger(Number(patient_id)) || Number(patient_id) < 1 ||
+      !Array.isArray(items) || items.length < 1 || items.length > 50 ||
+      !validDate(issue_date) || !validDate(due_date)) {
+    return res.status(400).json({ error: 'Choose a patient, valid dates, and between 1 and 50 invoice items.' });
+  }
+  const normalized = [];
+  for (const item of items) {
+    const quantity = Number(item?.quantity), unitPrice = Number(item?.unit_price);
+    if (typeof item?.description !== 'string' || !item.description.trim() || item.description.trim().length > 200 ||
+        !Number.isFinite(quantity) || quantity <= 0 || quantity > 10000 ||
+        Math.abs(quantity * 100 - Math.round(quantity * 100)) > 1e-8 ||
+        !Number.isFinite(unitPrice) || unitPrice < 0 || unitPrice > 100000000 ||
+        Math.abs(unitPrice * 100 - Math.round(unitPrice * 100)) > 1e-8) {
+      return res.status(400).json({ error: 'Each item needs a description, positive quantity, and non-negative price.' });
+    }
+    normalized.push({ description: item.description.trim(), quantity, unitPrice });
+  }
+  const subtotalCents = normalized.reduce((sum, item) => sum + Math.round(item.quantity * item.unitPrice * 100), 0);
+  const discountCents = Math.round(Number(discount) * 100);
+  if (!Number.isSafeInteger(subtotalCents) || subtotalCents > 999999999999 ||
+      !Number.isFinite(Number(discount)) || discountCents < 0 || discountCents >= subtotalCents) {
+    return res.status(400).json({ error: 'Discount must be non-negative and less than the invoice subtotal.' });
+  }
+  const client = await pool.connect();
+  let invoiceId;
+  try {
+    await client.query('BEGIN');
+    const [patient] = (await client.query('SELECT id FROM patients WHERE id=$1', [patient_id])).rows;
+    if (!patient) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Patient file not found.' }); }
+    const [{ today }] = (await client.query('SELECT CURRENT_DATE::text AS today')).rows;
+    const date = issue_date || today;
+    const number = await nextInvoiceNumber(client, date);
+    const subtotal = subtotalCents / 100, reduction = discountCents / 100;
+    const [invoice] = (await client.query(
+      `INSERT INTO invoices (invoice_number,patient_id,issue_date,due_date,subtotal,discount,total,created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+      [number, patient_id, date, due_date || null, subtotal, reduction, subtotal - reduction, req.user.id])).rows;
+    invoiceId = invoice.id;
+    for (const item of normalized) {
+      const lineTotal = Math.round(item.quantity * item.unitPrice * 100) / 100;
+      await client.query(
+        'INSERT INTO invoice_items (invoice_id,description,quantity,unit_price,line_total) VALUES ($1,$2,$3,$4,$5)',
+        [invoiceId, item.description, item.quantity, item.unitPrice, lineTotal]);
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
+  res.status(201).json(await getInvoice(invoiceId));
+}));
+app.post('/api/invoices/:id/payments', wrap(async (req, res) => {
+  const { amount, type = 'Cash', batch_number, paid_at } = req.body || {};
+  const value = Number(amount), date = paid_at || null;
+  if (!Number.isFinite(value) || value <= 0 || value > 9999999999.99 ||
+      Math.abs(value * 100 - Math.round(value * 100)) > 1e-8 ||
+      !validDate(date) || !['Cash', 'Card', 'Transfer'].includes(type)) {
+    return res.status(400).json({ error: 'Enter a valid payment amount, date, and payment method.' });
+  }
+  const client = await pool.connect();
+  let payment;
+  try {
+    await client.query('BEGIN');
+    const [invoice] = (await client.query('SELECT * FROM invoices WHERE id=$1 FOR UPDATE', [req.params.id])).rows;
+    if (!invoice) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Invoice not found.' }); }
+    if (invoice.status === 'void') { await client.query('ROLLBACK'); return res.status(409).json({ error: 'A void invoice cannot receive payments.' }); }
+    const [totals] = (await client.query(
+      `SELECT (SELECT COALESCE(SUM(amount),0) FROM payments WHERE invoice_id=$1) AS paid,
+              (SELECT COALESCE(SUM(amount),0) FROM invoice_refunds WHERE invoice_id=$1) AS refunded`,
+      [invoice.id])).rows;
+    const balance = Number(invoice.total) - Number(totals.paid) + Number(totals.refunded);
+    if (value > balance + 0.001) { await client.query('ROLLBACK'); return res.status(400).json({ error: `Payment exceeds the invoice balance of $${Math.max(balance, 0).toFixed(2)}.` }); }
+    [payment] = (await client.query(
+      `INSERT INTO payments (patient_id,session_id,invoice_id,amount,type,batch_number,paid_at)
+       VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7::date,CURRENT_DATE)) RETURNING *`,
+      [invoice.patient_id, invoice.session_id, invoice.id, value, type, batch_number || null, date])).rows;
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
+  res.status(201).json({ payment, invoice: await getInvoice(req.params.id) });
+}));
+app.post('/api/invoices/:id/refunds', wrap(async (req, res) => {
+  const { amount, type = 'Cash', reason, refunded_at } = req.body || {};
+  const value = Number(amount), date = refunded_at || null;
+  if (!Number.isFinite(value) || value <= 0 || value > 9999999999.99 ||
+      Math.abs(value * 100 - Math.round(value * 100)) > 1e-8 || !validDate(date) ||
+      !['Cash', 'Card', 'Transfer'].includes(type) || typeof reason !== 'string' || !reason.trim() || reason.trim().length > 500) {
+    return res.status(400).json({ error: 'Enter a valid refund amount, method, date, and reason.' });
+  }
+  const client = await pool.connect();
+  let refund;
+  try {
+    await client.query('BEGIN');
+    const [invoice] = (await client.query('SELECT * FROM invoices WHERE id=$1 FOR UPDATE', [req.params.id])).rows;
+    if (!invoice) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Invoice not found.' }); }
+    const [totals] = (await client.query(
+      `SELECT (SELECT COALESCE(SUM(amount),0) FROM payments WHERE invoice_id=$1) AS paid,
+              (SELECT COALESCE(SUM(amount),0) FROM invoice_refunds WHERE invoice_id=$1) AS refunded`,
+      [invoice.id])).rows;
+    const refundable = Number(totals.paid) - Number(totals.refunded);
+    if (value > refundable + 0.001) { await client.query('ROLLBACK'); return res.status(400).json({ error: `Refund exceeds the refundable amount of $${Math.max(refundable, 0).toFixed(2)}.` }); }
+    [refund] = (await client.query(
+      `INSERT INTO invoice_refunds (invoice_id,amount,type,reason,refunded_at,created_by)
+       VALUES ($1,$2,$3,$4,COALESCE($5::date,CURRENT_DATE),$6) RETURNING *`,
+      [invoice.id, value, type, reason.trim(), date, req.user.id])).rows;
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
+  res.status(201).json({ refund, invoice: await getInvoice(req.params.id) });
+}));
+app.patch('/api/invoices/:id/void', wrap(async (req, res) => {
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+  if (!reason || reason.length > 500) return res.status(400).json({ error: 'Enter a reason for voiding this invoice.' });
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const [invoice] = (await client.query('SELECT * FROM invoices WHERE id=$1 FOR UPDATE', [req.params.id])).rows;
+    if (!invoice) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Invoice not found.' }); }
+    const [totals] = (await client.query(
+      `SELECT (SELECT COALESCE(SUM(amount),0) FROM payments WHERE invoice_id=$1) AS paid,
+              (SELECT COALESCE(SUM(amount),0) FROM invoice_refunds WHERE invoice_id=$1) AS refunded`,
+      [invoice.id])).rows;
+    if (invoice.status !== 'void' && Number(totals.paid) > Number(totals.refunded)) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Refund all recorded invoice payments before voiding this invoice.' });
+    }
+    await client.query("UPDATE invoices SET status='void',voided_at=NOW(),void_reason=$1 WHERE id=$2", [reason, invoice.id]);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
+  res.json(await getInvoice(req.params.id));
 }));
 
 // ---------- Payments ----------
 app.get('/api/payments', wrap(async (req, res) => {
   const { date = '', name = '', amount = '', batch = '' } = req.query;
   res.json(await q(
-    `SELECT pay.*, p.name AS patient_name FROM payments pay JOIN patients p ON p.id=pay.patient_id
-     WHERE ($1='' OR pay.paid_at=$1::date) AND p.name ILIKE $2
-       AND ($3='' OR pay.amount=$3::numeric) AND ($4='' OR pay.batch_number ILIKE $5)
-     ORDER BY pay.paid_at DESC, pay.id DESC LIMIT 500`, [date, `%${name}%`, amount, batch, `%${batch}%`]));
+    `SELECT * FROM (
+       SELECT pay.id,pay.patient_id,pay.session_id,pay.invoice_id,pay.auto_session_payment,
+         pay.amount,pay.type,pay.batch_number,pay.paid_at,p.name AS patient_name
+       FROM payments pay JOIN patients p ON p.id=pay.patient_id
+       UNION ALL
+       SELECT -refund.id,i.patient_id,i.session_id,i.id AS invoice_id,FALSE AS auto_session_payment,
+         -refund.amount AS amount,'Refund: ' || refund.type AS type,refund.reason AS batch_number,
+         refund.refunded_at AS paid_at,p.name AS patient_name
+       FROM invoice_refunds refund JOIN invoices i ON i.id=refund.invoice_id
+       JOIN patients p ON p.id=i.patient_id
+     ) activity
+     WHERE ($1='' OR paid_at=$1::date) AND patient_name ILIKE $2
+       AND ($3='' OR amount=$3::numeric) AND ($4='' OR batch_number ILIKE $5)
+     ORDER BY paid_at DESC, id DESC LIMIT 500`, [date, `%${name}%`, amount, batch, `%${batch}%`]));
 }));
 app.post('/api/payments', wrap(async (req, res) => {
   const { patient_id, session_id, amount, type, batch_number, paid_at } = req.body;
@@ -157,6 +591,9 @@ app.post('/api/payments', wrap(async (req, res) => {
   res.status(201).json(r);
 }));
 app.delete('/api/payments/:id', wrap(async (req, res) => {
+  const [payment] = await q('SELECT invoice_id FROM payments WHERE id=$1', [req.params.id]);
+  if (!payment) return res.status(404).json({ error: 'Payment not found.' });
+  if (payment.invoice_id) return res.status(409).json({ error: 'Invoice payments must be reversed using the invoice refund action.' });
   await q('DELETE FROM payments WHERE id=$1', [req.params.id]); res.json({ ok: true });
 }));
 

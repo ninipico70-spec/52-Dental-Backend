@@ -1,6 +1,8 @@
 require('dotenv').config();
-const { Pool } = require('pg');
+const { Pool, types } = require('pg');
 const databaseUrl = process.env.DATABASE_URL;
+
+types.setTypeParser(1082, value => value);
 
 module.exports = new Pool(databaseUrl
   ? {
