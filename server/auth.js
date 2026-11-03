@@ -1,6 +1,6 @@
 const jwt = require('jsonwebtoken');
 const pool = require('./db');
-const { DEFAULT_ROLE_PERMISSIONS, allPermissions, mergePermissions } = require('./permissions');
+const { DEFAULT_ROLE_PERMISSIONS, allPermissions, normalizePermissions } = require('./permissions');
 const secret = () => process.env.JWT_SECRET || 'dev-secret';
 exports.sign = u => jwt.sign({ id: u.id, role: u.role, name: u.name }, secret(), { expiresIn: '12h' });
 exports.required = (req, res, next) => {
@@ -9,7 +9,7 @@ exports.required = (req, res, next) => {
   try { token = jwt.verify(t, secret()); }
   catch { return res.status(401).json({ error: 'Please sign in again.' }); }
   pool.query(
-    `SELECT u.id,u.name,u.role,u.active,u.permission_overrides,r.permissions AS role_permissions
+    `SELECT u.id,u.name,u.role,u.active,r.permissions AS role_permissions
      FROM users u LEFT JOIN role_permissions r ON r.role=u.role
      WHERE u.id=$1`,
     [token.id]
@@ -17,14 +17,14 @@ exports.required = (req, res, next) => {
     const user = rows[0];
     if (!user || !user.active)
       return res.status(401).json({ error: 'Please sign in again.' });
-    const defaults = user.role_permissions || DEFAULT_ROLE_PERMISSIONS[user.role];
+    const defaults = normalizePermissions(user.role_permissions || DEFAULT_ROLE_PERMISSIONS[user.role]);
     req.user = {
       id: user.id,
       name: user.name,
       role: user.role,
       permissions: user.role === 'admin'
         ? allPermissions()
-        : mergePermissions(defaults, user.permission_overrides)
+        : defaults
     };
     next();
   }).catch(next);

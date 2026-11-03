@@ -9,8 +9,7 @@ const { sign, required, adminOnly, requirePermission, requireAllPermissions, req
 const {
   DEFAULT_ROLE_PERMISSIONS,
   normalizePermissions,
-  constrainRolePermissions,
-  constrainOverrides
+  constrainRolePermissions
 } = require('./permissions');
 
 const app = express();
@@ -37,10 +36,6 @@ async function start() {
   for (const role of await q('SELECT role,permissions FROM role_permissions')) {
     const permissions = constrainRolePermissions(role.permissions);
     await q('UPDATE role_permissions SET permissions=$1::jsonb WHERE role=$2', [JSON.stringify(permissions), role.role]);
-  }
-  for (const user of await q('SELECT id,permission_overrides FROM users')) {
-    const overrides = constrainOverrides(user.permission_overrides);
-    await q('UPDATE users SET permission_overrides=$1::jsonb WHERE id=$2', [JSON.stringify(overrides), user.id]);
   }
   console.log('Database schema ready.');
 
@@ -711,8 +706,7 @@ app.patch('/api/users/:id', adminOnly, wrap(async (req, res) => {
 
 app.get('/api/permissions', adminOnly, wrap(async (req, res) => {
   const roles = await q('SELECT role,permissions FROM role_permissions ORDER BY role');
-  const users = await q('SELECT id,name,email,role,permission_overrides FROM users ORDER BY name,id');
-  res.json({ roles, users });
+  res.json({ roles });
 }));
 app.put('/api/permissions/roles/:role', adminOnly, wrap(async (req, res) => {
   const { role } = req.params;
@@ -729,21 +723,9 @@ app.put('/api/permissions/roles/:role', adminOnly, wrap(async (req, res) => {
   );
   res.json(saved);
 }));
-app.put('/api/users/:id/permissions', adminOnly, wrap(async (req, res) => {
-  let overrides;
-  try { overrides = normalizePermissions(req.body?.overrides || {}, true); }
-  catch (error) { return res.status(400).json({ error: error.message }); }
-  const [user] = await q(
-    'UPDATE users SET permission_overrides=$1::jsonb WHERE id=$2 AND role <> $3 RETURNING id,permission_overrides',
-    [JSON.stringify(overrides), req.params.id, 'admin']
-  );
-  if (!user) return res.status(404).json({ error: 'Non-admin user not found.' });
-  res.json(user);
-}));
-
 // Own password change
 app.get('/api/me', wrap(async (req, res) => {
-  const [user] = await q('SELECT id,name,email,role,phone,photo,permission_overrides FROM users WHERE id=$1 AND active', [req.user.id]);
+  const [user] = await q('SELECT id,name,email,role,phone,photo FROM users WHERE id=$1 AND active', [req.user.id]);
   if (!user) return res.status(404).json({ error: 'User profile not found.' });
   res.json({ ...user, permissions: req.user.permissions });
 }));

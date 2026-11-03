@@ -63,7 +63,7 @@ function allPermissions() {
   return Object.fromEntries(FEATURES.map(feature => [feature, grid(true, true, true, true)]));
 }
 
-function normalizePermissions(input, partial = false) {
+function normalizePermissions(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input))
     throw new Error('Permissions must be an object.');
   if (Object.keys(input).some(feature => !FEATURES.includes(feature)))
@@ -73,8 +73,7 @@ function normalizePermissions(input, partial = false) {
   for (const feature of FEATURES) {
     const source = input[feature];
     if (source === undefined) {
-      if (!partial) throw new Error(`Permissions are missing ${feature}.`);
-      continue;
+      throw new Error(`Permissions are missing ${feature}.`);
     }
     if (!source || typeof source !== 'object' || Array.isArray(source) ||
         Object.keys(source).some(action => !ACTIONS.includes(action)))
@@ -83,8 +82,7 @@ function normalizePermissions(input, partial = false) {
     for (const action of ACTIONS) {
       const value = source[action];
       if (value === undefined) {
-        if (!partial) throw new Error(`Permissions are missing ${feature}.${action}.`);
-        continue;
+        throw new Error(`Permissions are missing ${feature}.${action}.`);
       }
       if (typeof value !== 'boolean')
         throw new Error(`Permission ${feature}.${action} must be true or false.`);
@@ -92,16 +90,8 @@ function normalizePermissions(input, partial = false) {
         throw new Error(`Permission ${feature}.${action} is not supported.`);
       actions[action] = value;
     }
-    if (Object.keys(actions).length) result[feature] = actions;
+    result[feature] = actions;
   }
-  return result;
-}
-
-function mergePermissions(defaults, overrides) {
-  const result = normalizePermissions(defaults);
-  const normalizedOverrides = normalizePermissions(overrides || {}, true);
-  for (const [feature, actions] of Object.entries(normalizedOverrides))
-    Object.assign(result[feature], actions);
   return result;
 }
 
@@ -123,25 +113,6 @@ function constrainRolePermissions(input) {
   return normalizePermissions(permissions);
 }
 
-function constrainOverrides(input) {
-  if (!input || typeof input !== 'object' || Array.isArray(input))
-    throw new Error('Stored user permission overrides must be an object.');
-  const overrides = {};
-  for (const [feature, actions] of Object.entries(input)) {
-    if (!FEATURES.includes(feature) || !actions || typeof actions !== 'object' || Array.isArray(actions))
-      throw new Error('Stored user permission overrides are invalid.');
-    const supported = {};
-    for (const [action, value] of Object.entries(actions)) {
-      if (!ACTIONS.includes(action)) throw new Error(`Unknown permission action: ${action}.`);
-      if (!FEATURE_ACTIONS[feature].includes(action)) continue;
-      if (typeof value !== 'boolean') throw new Error(`Stored permission ${feature}.${action} is invalid.`);
-      supported[action] = value;
-    }
-    if (Object.keys(supported).length) overrides[feature] = supported;
-  }
-  return normalizePermissions(overrides, true);
-}
-
 module.exports = {
   FEATURES,
   ACTIONS,
@@ -149,7 +120,5 @@ module.exports = {
   DEFAULT_ROLE_PERMISSIONS,
   allPermissions,
   normalizePermissions,
-  mergePermissions,
-  constrainRolePermissions,
-  constrainOverrides
+  constrainRolePermissions
 };
