@@ -28,6 +28,8 @@ accounts always retain full access. Some workflows require related grants (for
 example, creating an appointment requires patient view, and creating a session
 requires session edit to complete the record). The database preserves
 configured role defaults when the service restarts.
+Admins can also create, edit, enable, and disable user accounts from the same
+page.
 
 The Billing & Invoices page creates invoices manually or from a saved session.
 Invoice records include itemized totals, discounts, due dates, partial payments,

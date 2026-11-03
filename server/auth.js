@@ -17,14 +17,13 @@ exports.required = (req, res, next) => {
     const user = rows[0];
     if (!user || !user.active)
       return res.status(401).json({ error: 'Please sign in again.' });
-    const defaults = normalizePermissions(user.role_permissions || DEFAULT_ROLE_PERMISSIONS[user.role]);
     req.user = {
       id: user.id,
       name: user.name,
       role: user.role,
       permissions: user.role === 'admin'
         ? allPermissions()
-        : defaults
+        : normalizePermissions(user.role_permissions || DEFAULT_ROLE_PERMISSIONS[user.role])
     };
     next();
   }).catch(next);

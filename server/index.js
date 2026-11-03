@@ -695,12 +695,35 @@ app.post('/api/users', adminOnly, wrap(async (req, res) => {
   res.status(201).json(u);
 }));
 app.patch('/api/users/:id', adminOnly, wrap(async (req, res) => {
-  const { active, role, password } = req.body;
-  if (role && !['doctor', 'assistant', 'receptionist', 'admin'].includes(role))
+  const { active, role, password, name, email, phone } = req.body;
+  if (role !== undefined && !['doctor', 'assistant', 'receptionist', 'admin'].includes(role))
     return res.status(400).json({ error: 'Choose a valid user role.' });
-  if (password) await q('UPDATE users SET password_hash=$1 WHERE id=$2', [await bcrypt.hash(password, 10), req.params.id]);
-  if (role) await q('UPDATE users SET role=$1 WHERE id=$2', [role, req.params.id]);
-  if (typeof active === 'boolean' && +req.params.id !== req.user.id) await q('UPDATE users SET active=$1 WHERE id=$2', [active, req.params.id]);
+  if (name !== undefined && (typeof name !== 'string' || !name.trim()))
+    return res.status(400).json({ error: 'A name is required.' });
+  if (email !== undefined && (typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())))
+    return res.status(400).json({ error: 'Enter a valid e-mail address.' });
+  if (phone !== undefined && phone !== null && typeof phone !== 'string')
+    return res.status(400).json({ error: 'Enter a valid phone number.' });
+  if (password !== undefined && password !== '' && (typeof password !== 'string' || password.length < 8))
+    return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+
+  const updates = [];
+  const values = [];
+  const set = (column, value) => {
+    values.push(value);
+    updates.push(`${column}=$${values.length}`);
+  };
+  if (name !== undefined) set('name', name.trim());
+  if (email !== undefined) set('email', email.trim().toLowerCase());
+  if (phone !== undefined) set('phone', phone || null);
+  if (role !== undefined) set('role', role);
+  if (password) set('password_hash', await bcrypt.hash(password, 10));
+  if (typeof active === 'boolean' && +req.params.id !== req.user.id) set('active', active);
+  if (updates.length) {
+    values.push(req.params.id);
+    const updated = await q(`UPDATE users SET ${updates.join(',')} WHERE id=$${values.length} RETURNING id`, values);
+    if (!updated.length) return res.status(404).json({ error: 'User not found.' });
+  }
   res.json({ ok: true });
 }));
 
