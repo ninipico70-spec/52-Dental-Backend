@@ -62,7 +62,18 @@ INSERT INTO services (service_key,name,icon,duration_minutes,price,sort_order) V
   ('extraction','Extraction','✂️',45,0,5),
   ('whitening','Whitening','☀️',60,0,6),
   ('consultation','Consultation','🗨️',30,0,7),
-  ('orthodontics','Orthodontics','🦷',60,0,8)
+  ('orthodontics','Orthodontics','🦷',60,0,8),
+  ('orthodontic-treatment','Orthodontic Treatment','😁',60,0,9),
+  ('implantology','Implantology','🦷',90,0,10),
+  ('oral-surgery','Oral Surgery','🩺',60,0,11),
+  ('preventive-dentistry','Preventive Dentistry','🛡️',45,0,12),
+  ('screening','Screening','🔎',30,0,13),
+  ('periodontics-dentistry','Periodontics Dentistry','🦷',60,0,14),
+  ('aesthetics-dentistry','Aesthetics Dentistry','✨',60,0,15),
+  ('endodontics-dentistry','Endodontics Dentistry','〽️',90,0,16),
+  ('prosthodontics-dentistry','Prosthodontics Dentistry','🦷',60,0,17),
+  ('restorative-dentistry','Restorative Dentistry','✚',60,0,18),
+  ('x-ray','X-ray','🩻',20,0,19)
 ON CONFLICT (service_key) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS session_services (

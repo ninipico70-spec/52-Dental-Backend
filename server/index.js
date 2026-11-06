@@ -182,10 +182,61 @@ app.get('/api/dashboard', wrap(async (req, res) => {
 
 // ---------- Patients ----------
 app.get('/api/patients', requirePermission('patients', 'view'), wrap(async (req, res) => {
-  const { name = '', from = '' } = req.query;
+  const search = typeof req.query.search === 'string'
+    ? req.query.search.trim()
+    : typeof req.query.name === 'string' ? req.query.name.trim() : '';
+  const from = typeof req.query.from === 'string' ? req.query.from : '';
+  const gender = typeof req.query.gender === 'string' ? req.query.gender : '';
   res.json(await q(
-    `SELECT * FROM patients WHERE name ILIKE $1 AND ($2='' OR created_at::date >= $2::date)
-     ORDER BY created_at DESC, id DESC LIMIT 500`, [`%${name}%`, from]));
+    `SELECT * FROM patients WHERE
+       ($1='' OR name ILIKE $2 OR phone ILIKE $2 OR id::text = $1)
+       AND ($3='' OR created_at::date >= $3::date)
+       AND ($4='' OR gender=$4)
+     ORDER BY created_at DESC, id DESC LIMIT 500`, [search, `%${search}%`, from, gender]));
+}));
+app.post('/api/patients/import', requirePermission('patients', 'create'), wrap(async (req, res) => {
+  const patients = req.body?.patients;
+  if (!Array.isArray(patients) || patients.length < 1 || patients.length > 500)
+    return res.status(400).json({ error: 'Import between 1 and 500 patient records at a time.' });
+  const valid = patients.every(patient =>
+    patient && typeof patient.name === 'string' && patient.name.trim().length > 0 &&
+    patient.name.trim().length <= 200 && typeof patient.phone === 'string' &&
+    patient.phone.trim().length > 0 && patient.phone.trim().length <= 80 &&
+    (patient.gender === null || patient.gender === '' || ['Male', 'Female'].includes(patient.gender)) &&
+    (patient.note === undefined || typeof patient.note === 'string'));
+  if (!valid)
+    return res.status(400).json({ error: 'Each row needs a patient name and phone number. Gender must be Male or Female.' });
+
+  const normalizePhone = phone => phone.replace(/\D/g, '') || phone.trim().toLowerCase();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const existing = await client.query('SELECT phone FROM patients');
+    const phoneNumbers = new Set(existing.rows.map(patient => normalizePhone(patient.phone)));
+    let created = 0;
+    let skipped = 0;
+    for (const patient of patients) {
+      const phone = patient.phone.trim();
+      const normalizedPhone = normalizePhone(phone);
+      if (phoneNumbers.has(normalizedPhone)) {
+        skipped++;
+        continue;
+      }
+      await client.query(
+        'INSERT INTO patients (name,phone,gender,note) VALUES ($1,$2,$3,$4)',
+        [patient.name.trim(), phone, patient.gender || null, patient.note?.trim() || null]
+      );
+      phoneNumbers.add(normalizedPhone);
+      created++;
+    }
+    await client.query('COMMIT');
+    res.status(201).json({ created, skipped });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 }));
 app.post('/api/patients', requirePermission('patients', 'create'), wrap(async (req, res) => {
   const { name, phone, gender, note } = req.body;
@@ -199,6 +250,9 @@ app.get('/api/patients/:id', requirePermission('patients', 'view'), wrap(async (
   if (!p) return res.status(404).json({ error: 'Patient file not found.' });
   p.sessions = req.user.permissions.sessions.view
     ? await q('SELECT * FROM sessions WHERE patient_id=$1 ORDER BY session_date DESC, id DESC', [p.id])
+    : [];
+  p.appointments = req.user.permissions.appointments.view
+    ? await q('SELECT * FROM appointments WHERE patient_id=$1 ORDER BY appt_at DESC, id DESC', [p.id])
     : [];
   res.json(p);
 }));
