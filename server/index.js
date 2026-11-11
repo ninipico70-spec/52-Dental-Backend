@@ -154,6 +154,11 @@ app.patch('/api/services/:id', requirePermission('services', 'edit'), wrap(async
   if (!service) return res.status(404).json({ error: 'Service not found.' });
   res.json(service);
 }));
+app.delete('/api/services/:id', requirePermission('services', 'delete'), wrap(async (req, res) => {
+  const [service] = await q('DELETE FROM services WHERE id=$1 RETURNING id', [req.params.id]);
+  if (!service) return res.status(404).json({ error: 'Service not found.' });
+  res.json({ ok: true });
+}));
 
 // ---------- Dashboard ----------
 app.get('/api/dashboard', wrap(async (req, res) => {
@@ -181,18 +186,54 @@ app.get('/api/dashboard', wrap(async (req, res) => {
 }));
 
 // ---------- Patients ----------
+app.get('/api/patient-doctors', requirePermission('patients', 'create'), wrap(async (req, res) => {
+  res.json(await q(
+    "SELECT id,name FROM users WHERE active AND role IN ('doctor','admin') ORDER BY name,id"
+  ));
+}));
 app.get('/api/patients', requirePermission('patients', 'view'), wrap(async (req, res) => {
   const search = typeof req.query.search === 'string'
     ? req.query.search.trim()
     : typeof req.query.name === 'string' ? req.query.name.trim() : '';
   const from = typeof req.query.from === 'string' ? req.query.from : '';
   const gender = typeof req.query.gender === 'string' ? req.query.gender : '';
+  const canViewPatientSessions = req.user.role === 'admin' || req.user.permissions.sessions.view;
+  const canViewReceivables = req.user.role === 'admin' || req.user.permissions.reports.view;
   res.json(await q(
-    `SELECT * FROM patients WHERE
-       ($1='' OR name ILIKE $2 OR phone ILIKE $2 OR id::text = $1)
-       AND ($3='' OR created_at::date >= $3::date)
-       AND ($4='' OR gender=$4)
-     ORDER BY created_at DESC, id DESC LIMIT 500`, [search, `%${search}%`, from, gender]));
+    `SELECT p.id,p.name,p.phone,p.gender,p.note,p.photo IS NOT NULL AS has_photo,
+       p.doctor_assigned,p.registration_date,p.created_at,
+       ${canViewPatientSessions ? `COALESCE(
+        (SELECT u.name FROM sessions s
+         LEFT JOIN users u ON u.id=s.created_by
+         WHERE s.patient_id=p.id
+         ORDER BY s.session_date DESC,s.id DESC LIMIT 1),
+        (SELECT assigned.name FROM users assigned WHERE assigned.id=p.doctor_assigned)
+       )` : 'NULL'} AS doctor_name,
+       ${canViewPatientSessions ? '(p.dental_noted OR EXISTS (SELECT 1 FROM sessions s WHERE s.patient_id=p.id))' : 'FALSE'} AS has_sessions,
+       ${canViewPatientSessions ? `(p.implant_noted OR EXISTS (SELECT 1 FROM session_services ss
+         JOIN sessions s ON s.id=ss.session_id
+         WHERE s.patient_id=p.id AND ss.service_name ILIKE '%implant%'))` : 'FALSE'} AS has_implant,
+       ${canViewReceivables ? `(
+         (SELECT COALESCE(SUM(s.cost),0) FROM sessions s
+          WHERE s.patient_id=p.id AND NOT EXISTS
+            (SELECT 1 FROM invoices i WHERE i.session_id=s.id AND i.status='open'))
+         + (SELECT COALESCE(SUM(i.total),0) FROM invoices i
+            WHERE i.patient_id=p.id AND i.status='open')
+       ) > (
+         (SELECT COALESCE(SUM(pay.amount),0) FROM payments pay WHERE pay.patient_id=p.id)
+         - (SELECT COALESCE(SUM(r.amount),0) FROM invoice_refunds r
+            JOIN invoices i ON i.id=r.invoice_id WHERE i.patient_id=p.id)
+       )` : 'FALSE'} AS has_receivable
+     FROM patients p WHERE
+       ($1='' OR p.name ILIKE $2 OR p.phone ILIKE $2 OR p.id::text = $1)
+       AND ($3='' OR p.registration_date >= $3::date)
+       AND ($4='' OR p.gender=$4)
+     ORDER BY p.created_at DESC, p.id DESC LIMIT 500`, [search, `%${search}%`, from, gender]));
+}));
+app.get('/api/patients/:id/photo', requirePermission('patients', 'view'), wrap(async (req, res) => {
+  const [patient] = await q('SELECT photo FROM patients WHERE id=$1', [req.params.id]);
+  if (!patient) return res.status(404).json({ error: 'Patient file not found.' });
+  res.json({ photo: patient.photo });
 }));
 app.post('/api/patients/import', requirePermission('patients', 'create'), wrap(async (req, res) => {
   const patients = req.body?.patients;
@@ -239,17 +280,65 @@ app.post('/api/patients/import', requirePermission('patients', 'create'), wrap(a
   }
 }));
 app.post('/api/patients', requirePermission('patients', 'create'), wrap(async (req, res) => {
-  const { name, phone, gender, note } = req.body;
-  if (!name || !phone) return res.status(400).json({ error: 'Patient name and telephone number are required.' });
-  const [p] = await q('INSERT INTO patients (name,phone,gender,note) VALUES ($1,$2,$3,$4) RETURNING *',
-    [name.trim(), phone.trim(), gender || null, note || null]);
+  const {
+    name, phone, gender, note, telegram_chat_id, age, address, medical_history,
+    dental_noted = false, implant_noted = false, doctor_assigned, photo, registration_date
+  } = req.body || {};
+  const validImage = typeof photo === 'string' && photo.length <= 600000 &&
+    /^data:image\/jpeg;base64,[A-Za-z0-9+/]+={0,2}$/.test(photo);
+  if (typeof name !== 'string' || !name.trim() || name.trim().length > 200 ||
+      typeof phone !== 'string' || !phone.trim() || phone.trim().length > 80 ||
+      (gender && !['Male', 'Female'].includes(gender)) ||
+      (age !== undefined && age !== null && age !== '' &&
+        (!Number.isInteger(Number(age)) || Number(age) < 0 || Number(age) > 150)) ||
+      (telegram_chat_id != null && (typeof telegram_chat_id !== 'string' || telegram_chat_id.length > 100)) ||
+      (address != null && (typeof address !== 'string' || address.length > 500)) ||
+      (medical_history != null && (typeof medical_history !== 'string' || medical_history.length > 10000)) ||
+      (note != null && (typeof note !== 'string' || note.length > 10000)) ||
+      typeof dental_noted !== 'boolean' || typeof implant_noted !== 'boolean' ||
+      (photo != null && !validImage) ||
+      (registration_date != null && !validDate(registration_date)) ||
+      (doctor_assigned != null && doctor_assigned !== '' &&
+        (!Number.isInteger(Number(doctor_assigned)) || Number(doctor_assigned) < 1))) {
+    return res.status(400).json({ error: 'Check the patient details and try again. Age must be 0–150, and uploaded photos must be valid JPEG images.' });
+  }
+  const assignedDoctor = doctor_assigned ? Number(doctor_assigned) : null;
+  if (assignedDoctor) {
+    const [doctor] = await q(
+      "SELECT id FROM users WHERE id=$1 AND active AND role IN ('doctor','admin')",
+      [assignedDoctor]
+    );
+    if (!doctor) return res.status(400).json({ error: 'Choose an active doctor from the list.' });
+  }
+  const [p] = await q(
+    `INSERT INTO patients
+       (name,phone,gender,note,telegram_chat_id,age,address,medical_history,dental_noted,
+        implant_noted,doctor_assigned,photo,registration_date)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,COALESCE($13::date,CURRENT_DATE))
+     RETURNING *`,
+    [
+      name.trim(), phone.trim(), gender || null, note?.trim() || null,
+      telegram_chat_id?.trim() || null, age === '' || age == null ? null : Number(age),
+      address?.trim() || null, medical_history?.trim() || null, dental_noted,
+      implant_noted, assignedDoctor, photo || null, registration_date || null
+    ]);
   res.status(201).json(p);
 }));
 app.get('/api/patients/:id', requirePermission('patients', 'view'), wrap(async (req, res) => {
   const [p] = await q('SELECT * FROM patients WHERE id=$1', [req.params.id]);
   if (!p) return res.status(404).json({ error: 'Patient file not found.' });
+  p.doctor_name = p.doctor_assigned
+    ? (await q('SELECT name FROM users WHERE id=$1', [p.doctor_assigned]))[0]?.name || null
+    : null;
   p.sessions = req.user.permissions.sessions.view
-    ? await q('SELECT * FROM sessions WHERE patient_id=$1 ORDER BY session_date DESC, id DESC', [p.id])
+    ? await q(
+      `SELECT s.*,
+         COALESCE((SELECT json_agg(json_build_object(
+           'name',ss.service_name,'icon',ss.icon,'price',ss.unit_price
+         ) ORDER BY ss.id) FROM session_services ss WHERE ss.session_id=s.id),'[]'::json) AS services
+       FROM sessions s WHERE s.patient_id=$1 ORDER BY s.session_date DESC,s.id DESC`,
+      [p.id]
+    )
     : [];
   p.appointments = req.user.permissions.appointments.view
     ? await q('SELECT * FROM appointments WHERE patient_id=$1 ORDER BY appt_at DESC, id DESC', [p.id])
@@ -257,13 +346,98 @@ app.get('/api/patients/:id', requirePermission('patients', 'view'), wrap(async (
   res.json(p);
 }));
 app.put('/api/patients/:id', requirePermission('patients', 'edit'), wrap(async (req, res) => {
-  const { name, phone, gender, note } = req.body;
-  const [p] = await q('UPDATE patients SET name=$1,phone=$2,gender=$3,note=$4 WHERE id=$5 RETURNING *',
-    [name, phone, gender || null, note || null, req.params.id]);
+  const { name, phone, gender, note, photo } = req.body || {};
+  const validPhoto = typeof photo === 'string' && photo.length <= 600000 &&
+    /^data:image\/jpeg;base64,[A-Za-z0-9+/]+={0,2}$/.test(photo);
+  if (photo != null && photo !== '' && !validPhoto)
+    return res.status(400).json({ error: 'Choose a valid JPEG patient photo.' });
+  const [p] = await q(
+    `UPDATE patients SET name=$1,phone=$2,gender=$3,note=$4,photo=COALESCE(NULLIF($5,''),photo)
+     WHERE id=$6 RETURNING *`,
+    [name, phone, gender || null, note || null, photo || null, req.params.id]);
   p ? res.json(p) : res.status(404).json({ error: 'Patient file not found.' });
 }));
 app.delete('/api/patients/:id', requirePermission('patients', 'delete'), wrap(async (req, res) => {
   await q('DELETE FROM patients WHERE id=$1', [req.params.id]); res.json({ ok: true });
+}));
+
+// ---------- Patient consultation records ----------
+const consultationConditions = new Set([
+  'Normal', 'Healthy', 'Cavity', 'Root Canal', 'Extraction', 'Crown', 'Bridge', 'Implant', 'Filling'
+]);
+const validFdiTooth = tooth => {
+  const value = Number(tooth);
+  const quadrant = Math.floor(value / 10);
+  const position = value % 10;
+  return Number.isInteger(value) &&
+    ((quadrant >= 1 && quadrant <= 4 && position >= 1 && position <= 8) ||
+     (quadrant >= 5 && quadrant <= 8 && position >= 1 && position <= 5));
+};
+const validOdontogram = odontogram => odontogram && typeof odontogram === 'object' &&
+  !Array.isArray(odontogram) && Object.entries(odontogram).length <= 52 &&
+  Object.entries(odontogram).every(([tooth, record]) =>
+    validFdiTooth(tooth) && record && typeof record === 'object' && !Array.isArray(record) &&
+    consultationConditions.has(record.condition) &&
+    (record.recordDate == null || validDate(record.recordDate)));
+const validateConsultation = body => {
+  const stringFields = ['name_kh', 'name_en', 'sex', 'nationality', 'occupation', 'address', 'phone', 'chief_complaint', 'medical_alert'];
+  return stringFields.every(field =>
+    body[field] == null || (typeof body[field] === 'string' && body[field].length <= 5000)) &&
+    (body.sex == null || body.sex === '' || ['Female', 'Male', 'Other'].includes(body.sex)) &&
+    (body.dob == null || body.dob === '' || validDate(body.dob)) &&
+    (body.record_date == null || validDate(body.record_date)) &&
+    (body.dentition == null || ['adult', 'pediatric'].includes(body.dentition)) &&
+    validOdontogram(body.odontogram);
+};
+app.get('/api/patients/:id/consultations', requirePermission('patients', 'view'), wrap(async (req, res) => {
+  const [patient] = await q('SELECT id FROM patients WHERE id=$1', [req.params.id]);
+  if (!patient) return res.status(404).json({ error: 'Patient file not found.' });
+  res.json(await q(
+    `SELECT id,patient_id,record_date,name_kh,name_en,sex,nationality,dob,occupation,address,phone,
+       dentition,chief_complaint,medical_alert,odontogram,created_at,updated_at
+     FROM consultations WHERE patient_id=$1 ORDER BY record_date DESC,id DESC`,
+    [patient.id]
+  ));
+}));
+app.post('/api/patients/:id/consultations', requireAllPermissions(['patients', 'view'], ['sessions', 'edit']), wrap(async (req, res) => {
+  const body = req.body || {};
+  if (!validateConsultation(body))
+    return res.status(400).json({ error: 'Check the consultation details and tooth records, then try again.' });
+  const [record] = await q(
+    `INSERT INTO consultations
+       (patient_id,record_date,name_kh,name_en,sex,nationality,dob,occupation,address,phone,
+        dentition,chief_complaint,medical_alert,odontogram,created_by)
+     SELECT p.id,COALESCE($2::date,CURRENT_DATE),$3,$4,$5,$6,$7::date,$8,$9,$10,
+       COALESCE($11,'adult'),$12,$13,$14::jsonb,$15
+     FROM patients p WHERE p.id=$1
+     RETURNING id,patient_id,record_date,name_kh,name_en,sex,nationality,dob,occupation,address,phone,
+       dentition,chief_complaint,medical_alert,odontogram,created_at,updated_at`,
+    [req.params.id, body.record_date || null, body.name_kh || null, body.name_en || null, body.sex || null,
+      body.nationality || null, body.dob || null, body.occupation || null, body.address || null,
+      body.phone || null, body.dentition || 'adult', body.chief_complaint || null, body.medical_alert || null,
+      JSON.stringify(body.odontogram), req.user.id]
+  );
+  if (!record) return res.status(404).json({ error: 'Patient file not found.' });
+  res.status(201).json(record);
+}));
+app.put('/api/consultations/:id', requirePermission('sessions', 'edit'), wrap(async (req, res) => {
+  const body = req.body || {};
+  if (!validateConsultation(body))
+    return res.status(400).json({ error: 'Check the consultation details and tooth records, then try again.' });
+  const [record] = await q(
+    `UPDATE consultations SET record_date=COALESCE($1::date,CURRENT_DATE),name_kh=$2,name_en=$3,sex=$4,
+       nationality=$5,dob=$6::date,occupation=$7,address=$8,phone=$9,dentition=COALESCE($10,'adult'),
+       chief_complaint=$11,medical_alert=$12,odontogram=$13::jsonb,updated_at=NOW()
+     WHERE id=$14
+     RETURNING id,patient_id,record_date,name_kh,name_en,sex,nationality,dob,occupation,address,phone,
+       dentition,chief_complaint,medical_alert,odontogram,created_at,updated_at`,
+    [body.record_date || null, body.name_kh || null, body.name_en || null, body.sex || null,
+      body.nationality || null, body.dob || null, body.occupation || null, body.address || null,
+      body.phone || null, body.dentition || 'adult', body.chief_complaint || null, body.medical_alert || null,
+      JSON.stringify(body.odontogram), req.params.id]
+  );
+  if (!record) return res.status(404).json({ error: 'Consultation record not found.' });
+  res.json(record);
 }));
 
 // ---------- Statement ----------

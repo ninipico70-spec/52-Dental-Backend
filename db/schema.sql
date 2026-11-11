@@ -27,8 +27,29 @@ CREATE TABLE IF NOT EXISTS patients (
   phone TEXT NOT NULL,
   gender TEXT CHECK (gender IN ('Male','Female')),
   note TEXT,
+  telegram_chat_id TEXT,
+  age INT CHECK (age IS NULL OR age BETWEEN 0 AND 150),
+  address TEXT,
+  medical_history TEXT,
+  dental_noted BOOLEAN NOT NULL DEFAULT FALSE,
+  implant_noted BOOLEAN NOT NULL DEFAULT FALSE,
+  doctor_assigned INT REFERENCES users(id) ON DELETE SET NULL,
+  photo TEXT,
+  registration_date DATE NOT NULL DEFAULT CURRENT_DATE,
   created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
+ALTER TABLE patients ADD COLUMN IF NOT EXISTS telegram_chat_id TEXT;
+ALTER TABLE patients ADD COLUMN IF NOT EXISTS age INT CHECK (age IS NULL OR age BETWEEN 0 AND 150);
+ALTER TABLE patients ADD COLUMN IF NOT EXISTS address TEXT;
+ALTER TABLE patients ADD COLUMN IF NOT EXISTS medical_history TEXT;
+ALTER TABLE patients ADD COLUMN IF NOT EXISTS dental_noted BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE patients ADD COLUMN IF NOT EXISTS implant_noted BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE patients ADD COLUMN IF NOT EXISTS doctor_assigned INT REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE patients ADD COLUMN IF NOT EXISTS photo TEXT;
+ALTER TABLE patients ADD COLUMN IF NOT EXISTS registration_date DATE;
+UPDATE patients SET registration_date=created_at::date WHERE registration_date IS NULL;
+ALTER TABLE patients ALTER COLUMN registration_date SET DEFAULT CURRENT_DATE;
+ALTER TABLE patients ALTER COLUMN registration_date SET NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_patients_name ON patients (LOWER(name));
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -73,7 +94,9 @@ INSERT INTO services (service_key,name,icon,duration_minutes,price,sort_order) V
   ('endodontics-dentistry','Endodontics Dentistry','〽️',90,0,16),
   ('prosthodontics-dentistry','Prosthodontics Dentistry','🦷',60,0,17),
   ('restorative-dentistry','Restorative Dentistry','✚',60,0,18),
-  ('x-ray','X-ray','🩻',20,0,19)
+  ('x-ray','X-ray','🩻',20,0,19),
+  ('crowns','Crowns','🦷',60,0,20),
+  ('bridges','Bridges','🦷',60,0,21)
 ON CONFLICT (service_key) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS session_services (
@@ -97,6 +120,28 @@ CREATE TABLE IF NOT EXISTS session_teeth (
   note TEXT,
   UNIQUE (session_id, tooth)
 );
+
+CREATE TABLE IF NOT EXISTS consultations (
+  id SERIAL PRIMARY KEY,
+  patient_id INT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+  record_date DATE NOT NULL DEFAULT CURRENT_DATE,
+  name_kh TEXT,
+  name_en TEXT,
+  sex TEXT,
+  nationality TEXT,
+  dob DATE,
+  occupation TEXT,
+  address TEXT,
+  phone TEXT,
+  dentition TEXT NOT NULL DEFAULT 'adult' CHECK (dentition IN ('adult','pediatric')),
+  chief_complaint TEXT,
+  medical_alert TEXT,
+  odontogram JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_by INT REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_consultations_patient_date ON consultations (patient_id,record_date DESC,id DESC);
 
 CREATE SEQUENCE IF NOT EXISTS invoice_number_seq;
 CREATE TABLE IF NOT EXISTS invoices (

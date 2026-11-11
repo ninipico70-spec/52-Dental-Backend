@@ -10,7 +10,7 @@ const FEATURE_ACTIONS = {
   invoices: ['view', 'create', 'edit'],
   payments: ['view', 'create', 'edit', 'delete'],
   expenses: ['view', 'create', 'delete'],
-  services: ['view', 'create', 'edit'],
+  services: ['view', 'create', 'edit', 'delete'],
   reports: ['view'],
   users: ['view'],
   settings: ['view', 'edit']
